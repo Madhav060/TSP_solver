@@ -88,3 +88,5 @@ trained_models_tf/
 # SETUP_GUIDE.md
 # START_HERE.txt
 # PROJECT_STRUCTURE.txt
+
+tsp_checkpoints/

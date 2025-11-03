@@ -1,134 +1,214 @@
-import tensorflow as tf
-from tensorflow import keras
-from tensorflow.keras import optimizers
-from tqdm import tqdm # Progress bar
+"""
+PROPER REINFORCE Training for Your Attention Model
+Uses log_probs correctly to train the decoder
+"""
+
 import numpy as np
+import tensorflow as tf
+from tqdm import tqdm
 import os
-import random
 
-from attention_model import AttentionModelTF # Import the TF model
-from data_generator import generate_tsp_data
+from attention_model import AttentionModelTF
 
-def train_attention_model_tf(
-    # *** 1. MODIFIED: Start from 10 cities ***
-    min_cities: int = 10,
-    # *** 2. MODIFIED: Train up to 60 cities ***
-    max_cities: int = 60,
-    # ------------------------------------------------------------------
-    embed_dim: int = 128,
-    num_encoder_layers: int = 3,
-    num_heads: int = 8,
-    ff_dim: int = 512,
-    n_epochs: int = 100,
-    batch_size: int = 512,
-    steps_per_epoch: int = 500,
-    lr: float = 1e-4,
-    baseline_alpha: float = 0.99, # EMA decay factor for baseline
-    save_path: str = "trained_models_tf", # Separate folder for TF models
-    # *** 3. MODIFIED: New filename for the new model ***
-    model_filename: str = "tsp_10_60_attention_model_tf.weights.h5"
-    # --------------------------------------------------------
-):
+CONFIG = {
+    'n_cities': 20,
+    'train_samples': 10000,
+    'batch_size': 128,
+    'epochs': 100,
+    'learning_rate': 1e-4,
+    'baseline_decay': 0.9  # Exponential moving average for baseline
+}
+
+def generate_tsp_data(n_samples, n_cities):
+    """Generate random TSP instances."""
+    return np.random.rand(n_samples, n_cities, 2).astype(np.float32)
+
+print("="*70)
+print("PROPER REINFORCE TRAINING FOR TSP")
+print("="*70)
+print("Configuration:")
+for k, v in CONFIG.items():
+    print(f"  {k}: {v}")
+print("="*70)
+
+# Generate data
+print("\nGenerating training data...")
+train_data = generate_tsp_data(CONFIG['train_samples'], CONFIG['n_cities'])
+print(f"✓ Generated {CONFIG['train_samples']} instances")
+
+# Create model
+print("\nCreating model...")
+model = AttentionModelTF(
+    embed_dim=128,
+    num_encoder_layers=3,
+    num_heads=8,
+    ff_dim=512
+)
+
+# Build model
+dummy = tf.random.uniform((1, CONFIG['n_cities'], 2))
+_ = model(dummy, training=True, return_log_probs=True)
+
+total_params = sum([np.prod(v.shape) for v in model.trainable_variables])
+print(f"✓ Model created with {total_params:,} parameters")
+print(f"✓ Number of trainable variables: {len(model.trainable_variables)}")
+
+# Check layer names
+print("\nModel layers:")
+for v in model.trainable_variables[:5]:
+    print(f"  - {v.name}")
+print("  ...")
+for v in model.trainable_variables[-5:]:
+    print(f"  - {v.name}")
+
+# Optimizer
+optimizer = tf.keras.optimizers.Adam(CONFIG['learning_rate'])
+
+# Baseline for REINFORCE
+baseline = tf.Variable(10.0, trainable=False, dtype=tf.float32)
+
+@tf.function
+def train_step(batch_coords):
     """
-    Trains the AttentionModelTF for TSP using REINFORCE with baseline (TensorFlow version).
-    Trains on a range of city sizes.
+    REINFORCE training step.
+    
+    The key insight:
+    - Model samples tour and returns log_probs for each step
+    - Loss = (tour_length - baseline) * sum(log_probs)
+    - Gradients flow through log_probs back to decoder!
     """
-    # --- Ensure GPU is used if available ---
-    physical_devices = tf.config.list_physical_devices('GPU')
-    if physical_devices:
-        tf.config.experimental.set_memory_growth(physical_devices[0], True)
-        print(f"Using GPU: {physical_devices[0]}")
-    else:
-        print("Using CPU")
-
-    # --- Initialize Model, Optimizer, Baseline ---
-    model = AttentionModelTF(
-        embed_dim=embed_dim,
-        num_encoder_layers=num_encoder_layers,
-        num_heads=num_heads,
-        ff_dim=ff_dim
+    with tf.GradientTape() as tape:
+        # Forward pass with sampling (return_log_probs=True)
+        # Returns: (batch, n_cities) log_probs for each selection
+        tours_log_probs, tour_lengths, _ = model(
+            batch_coords, 
+            training=True, 
+            return_log_probs=True
+        )
+        
+        # REINFORCE loss computation
+        # Advantage: tour_length - baseline (we want to minimize length)
+        advantages = tour_lengths - baseline
+        
+        # Sum log probabilities over the tour
+        # tours_log_probs shape: (batch, n_cities)
+        sum_log_probs = tf.reduce_sum(tours_log_probs, axis=1)  # (batch,)
+        
+        # Policy gradient loss: advantage * log_prob
+        # We minimize this, which means:
+        # - If advantage > 0 (tour worse than baseline): decrease log_prob (make it less likely)
+        # - If advantage < 0 (tour better than baseline): increase log_prob (make it more likely)
+        pg_loss = tf.reduce_mean(advantages * sum_log_probs)
+        
+        loss = pg_loss
+    
+    # Compute gradients
+    gradients = tape.gradient(loss, model.trainable_variables)
+    
+    # Check for None gradients
+    none_count = sum(1 for g in gradients if g is None)
+    
+    if none_count > 0:
+        # This shouldn't happen now, but just in case
+        print(f"\n⚠️  WARNING: {none_count} gradients are None!")
+        for i, (g, v) in enumerate(zip(gradients, model.trainable_variables)):
+            if g is None:
+                print(f"  - {v.name}")
+    
+    # Clip gradients
+    gradients, global_norm = tf.clip_by_global_norm(gradients, 1.0)
+    
+    # Apply gradients
+    optimizer.apply_gradients(zip(gradients, model.trainable_variables))
+    
+    # Update baseline (exponential moving average)
+    baseline.assign(
+        CONFIG['baseline_decay'] * baseline + 
+        (1 - CONFIG['baseline_decay']) * tf.reduce_mean(tour_lengths)
     )
-    # Build the model by calling it once with dummy data (use max_cities for build)
-    dummy_input = tf.random.uniform((1, max_cities, 2))
-    _ = model(dummy_input) # This initializes weights
+    
+    return loss, tf.reduce_mean(tour_lengths), global_norm, none_count
 
-    optimizer = optimizers.Adam(learning_rate=lr)
+# Training loop
+print("\n" + "="*70)
+print("TRAINING")
+print("="*70)
 
-    baseline_reward = tf.Variable(0.0, trainable=False, dtype=tf.float32)
+best_length = float('inf')
 
-    print(f"\n--- Starting Training for TSP-{min_cities}-{max_cities} (TensorFlow) ---")
-    print(f"Hyperparameters:")
-    print(f"  Epochs: {n_epochs}")
-    print(f"  Batch Size: {batch_size}")
-    print(f"  Steps per Epoch: {steps_per_epoch}")
-    print(f"  Learning Rate: {lr}")
-    print(f"  EMA Alpha: {baseline_alpha}")
-    model.summary() # Print model structure
-
-    best_avg_length = tf.Variable(np.inf, trainable=False, dtype=tf.float32)
-
-    # --- Training Loop ---
-    for epoch in range(n_epochs):
-        epoch_total_loss = tf.Variable(0.0, dtype=tf.float32)
-        epoch_total_length = tf.Variable(0.0, dtype=tf.float32)
-        epoch_avg_cities = tf.Variable(0.0, dtype=tf.float32)
-
-        print(f"\nEpoch {epoch+1}/{n_epochs}")
-        pbar = tqdm(range(steps_per_epoch))
-
-        for step in pbar:
-            current_n_cities = random.randint(min_cities, max_cities)
-            inputs_np = generate_tsp_data(batch_size, current_n_cities)
-            inputs = tf.convert_to_tensor(inputs_np)
-
-            with tf.GradientTape() as tape:
-                tours_log_probs, tour_lengths, _ = model(inputs, return_log_probs=True, training=True)
-                reward = -tour_lengths
-                current_mean_reward = tf.reduce_mean(reward)
-                baseline_reward.assign(baseline_alpha * baseline_reward +
-                                       (1.0 - baseline_alpha) * current_mean_reward)
-                advantage = reward - baseline_reward
-                total_log_probs = tf.reduce_sum(tours_log_probs, axis=1)
-                loss = -tf.reduce_mean(advantage * total_log_probs)
-
-            gradients = tape.gradient(loss, model.trainable_variables)
-            gradients = [tf.clip_by_norm(g, 1.0) if g is not None else None for g in gradients]
-            optimizer.apply_gradients(zip(gradients, model.trainable_variables))
-
-            epoch_total_loss.assign_add(loss)
-            epoch_total_length.assign_add(tf.reduce_mean(tour_lengths))
-            epoch_avg_cities.assign_add(tf.cast(current_n_cities, tf.float32))
-
+for epoch in range(CONFIG['epochs']):
+    # Shuffle data
+    indices = np.random.permutation(CONFIG['train_samples'])
+    shuffled_data = train_data[indices]
+    
+    n_batches = CONFIG['train_samples'] // CONFIG['batch_size']
+    
+    epoch_losses = []
+    epoch_lengths = []
+    epoch_grad_norms = []
+    
+    with tqdm(total=n_batches, desc=f"Epoch {epoch+1:3d}/{CONFIG['epochs']}") as pbar:
+        for i in range(n_batches):
+            start = i * CONFIG['batch_size']
+            end = start + CONFIG['batch_size']
+            batch = shuffled_data[start:end]
+            
+            loss, length, grad_norm, none_count = train_step(batch)
+            
+            epoch_losses.append(loss.numpy())
+            epoch_lengths.append(length.numpy())
+            epoch_grad_norms.append(grad_norm.numpy())
+            
+            pbar.update(1)
             pbar.set_postfix({
-                'Loss': f"{loss.numpy():.4f}",
-                'Avg Len': f"{tf.reduce_mean(tour_lengths).numpy():.2f}",
-                'N_Cities': current_n_cities,
-                'Baseline': f"{-baseline_reward.numpy():.2f}"
+                'loss': f'{np.mean(epoch_losses):.3f}',
+                'len': f'{np.mean(epoch_lengths):.2f}',
+                'grad': f'{np.mean(epoch_grad_norms):.2f}',
+                'baseline': f'{baseline.numpy():.2f}'
             })
+    
+    avg_length = np.mean(epoch_lengths)
+    avg_loss = np.mean(epoch_losses)
+    avg_grad = np.mean(epoch_grad_norms)
+    
+    # Print every 10 epochs
+    if (epoch + 1) % 10 == 0:
+        print(f"\nEpoch {epoch+1:3d}:")
+        print(f"  Loss: {avg_loss:.4f}")
+        print(f"  Avg Length: {avg_length:.2f}")
+        print(f"  Baseline: {baseline.numpy():.2f}")
+        print(f"  Grad Norm: {avg_grad:.3f}")
+    
+    # Save best model
+    if avg_length < best_length:
+        best_length = avg_length
+        os.makedirs('trained_models_tf', exist_ok=True)
+        save_path = 'trained_models_tf/tsp_2_50_attention_model_tf.weights.h5'
+        model.save_weights(save_path)
+        
+        if (epoch + 1) % 10 == 0:
+            print(f"  ✓ New best! Saved model (best: {best_length:.2f})")
 
-        avg_loss = epoch_total_loss / steps_per_epoch
-        avg_length = epoch_total_length / steps_per_epoch
-        avg_cities = epoch_avg_cities / steps_per_epoch
-        print(f"End of Epoch {epoch+1}: Avg Loss = {avg_loss.numpy():.4f}, Avg Tour Length = {avg_length.numpy():.2f}, Avg Cities = {avg_cities.numpy():.1f}")
+print("\n" + "="*70)
+print("TRAINING COMPLETE")
+print("="*70)
+print(f"Best tour length: {best_length:.2f}")
 
-        if avg_length < best_avg_length:
-            best_avg_length.assign(avg_length)
-            os.makedirs(save_path, exist_ok=True)
-            full_save_path = os.path.join(save_path, model_filename)
-            model.save_weights(full_save_path) # Now uses the corrected filename
-            print(f"✓ New best model saved with avg length {best_avg_length.numpy():.2f} to {full_save_path}")
+# Save final model
+save_path = 'trained_models_tf/tsp_2_50_attention_model_tf.weights.h5'
+model.save_weights(save_path)
 
-    print(f"\n--- Training Finished for TSP-{min_cities}-{max_cities} (TensorFlow) ---")
-    print(f"Best average tour length achieved (across sizes): {best_avg_length.numpy():.2f}")
+file_size = os.path.getsize(save_path) / (1024 * 1024)
+print(f"\n✓ Final model saved: {save_path}")
+print(f"✓ File size: {file_size:.2f} MB")
 
-# --- Main Execution Block ---
-if __name__ == "__main__":
-    train_attention_model_tf(
-        min_cities=10,  # <-- Use new min
-        max_cities=60,  # <-- Use new max
-        n_epochs=100,
-        # *** 4. MODIFIED: Smaller batch size for stability on larger problems ***
-        batch_size=128, 
-        steps_per_epoch=500,
-        model_filename="tsp_10_60_attention_model_tf.weights.h5" # <-- Use new name
-    )
+if file_size < 10:
+    print("\n⚠️  WARNING: File is small - model may not have saved all weights")
+else:
+    print("✓ File size looks correct!")
+
+print("\n" + "="*70)
+print("Next steps:")
+print("  1. Run: python validate_model.py")
+print("  2. The model should now work properly!")
+print("="*70)
