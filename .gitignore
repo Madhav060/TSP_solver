@@ -1,0 +1,90 @@
+# -----------------------------
+# Python
+# -----------------------------
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+
+# Virtual environment
+.venv/
+env/
+venv/
+ENV/
+
+# Byte-compiled / optimized / DLL files
+*.egg
+*.egg-info/
+.eggs/
+build/
+dist/
+pip-wheel-metadata/
+
+# -----------------------------
+# IDE / Editor
+# -----------------------------
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
+
+# -----------------------------
+# Logs and caches
+# -----------------------------
+*.log
+*.out
+*.err
+*.tmp
+*.cache/
+.cache/
+.ipynb_checkpoints/
+
+# -----------------------------
+# Data and Models
+# -----------------------------
+# TensorFlow / PyTorch models
+trained_models_tf/
+*.ckpt
+*.h5
+*.pth
+*.pt
+*.pb
+
+# Generated datasets
+data/
+*.csv
+*.json
+*.npy
+*.npz
+
+# TSP data files
+*.tsp
+*.tour
+
+# -----------------------------
+# Experiments and Results
+# -----------------------------
+results/
+runs/
+output/
+*.gif
+*.png
+*.jpg
+
+# -----------------------------
+# OS-specific files
+# -----------------------------
+.DS_Store
+Thumbs.db
+desktop.ini
+
+drl_env/
+trained_models_tf/
+# -----------------------------
+# Custom project exclusions
+# -----------------------------
+# You can uncomment these if needed:
+# SETUP_GUIDE.md
+# START_HERE.txt
+# PROJECT_STRUCTURE.txt
