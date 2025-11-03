@@ -1,438 +1,233 @@
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
+import tensorflow as tf
+from tensorflow import keras
+from tensorflow.keras import layers
+import numpy as np
 import math
-from typing import Optional, Tuple
 
-class GraphEmbedding(nn.Module):
-    """
-    Initial embedding layer for city coordinates.
-    Projects 2D coordinates to a higher-dimensional space.
-    """
-    def __init__(self, input_dim: int, embed_dim: int):
-        super().__init__()
-        self.embedding = nn.Linear(input_dim, embed_dim)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # x shape: (batch_size, n_cities, input_dim=2)
-        return self.embedding(x)
-        # Output shape: (batch_size, n_cities, embed_dim)
-
-class MultiHeadAttention(nn.Module):
-    """
-    Standard Multi-Head Attention layer.
-    Allows the model to jointly attend to information from different
-    representation subspaces at different positions.
-    """
-    def __init__(self, embed_dim: int, n_heads: int):
-        super().__init__()
-        assert embed_dim % n_heads == 0, "Embedding dimension must be divisible by number of heads"
-        
+class GraphEmbedding(layers.Layer):
+    """Initial embedding layer for city coordinates using Dense layer."""
+    def __init__(self, embed_dim, **kwargs):
+        super().__init__(**kwargs)
         self.embed_dim = embed_dim
-        self.n_heads = n_heads
-        self.head_dim = embed_dim // n_heads
-        
-        # Linear layers for Q, K, V projections
-        self.Wq = nn.Linear(embed_dim, embed_dim)
-        self.Wk = nn.Linear(embed_dim, embed_dim)
-        self.Wv = nn.Linear(embed_dim, embed_dim)
-        
-        # Output projection
-        self.Wo = nn.Linear(embed_dim, embed_dim)
+        # Dense layer for projection
+        self.dense = layers.Dense(embed_dim, name='graph_embedding')
 
-    def _split_heads(self, x: torch.Tensor) -> torch.Tensor:
-        # x shape: (batch_size, seq_len, embed_dim)
-        batch_size, seq_len, _ = x.shape
-        return x.view(batch_size, seq_len, self.n_heads, self.head_dim).transpose(1, 2)
-        # Output shape: (batch_size, n_heads, seq_len, head_dim)
-
-    def _combine_heads(self, x: torch.Tensor) -> torch.Tensor:
-        # x shape: (batch_size, n_heads, seq_len, head_dim)
-        batch_size, _, seq_len, _ = x.shape
-        return x.transpose(1, 2).contiguous().view(batch_size, seq_len, self.embed_dim)
-        # Output shape: (batch_size, seq_len, embed_dim)
-
-    def forward(
-        self,
-        q: torch.Tensor,
-        k: torch.Tensor,
-        v: torch.Tensor,
-        mask: Optional[torch.Tensor] = None
-    ) -> torch.Tensor:
-        # Project Q, K, V
-        Q = self.Wq(q) # (batch_size, q_len, embed_dim)
-        K = self.Wk(k) # (batch_size, k_len, embed_dim)
-        V = self.Wv(v) # (batch_size, v_len, embed_dim)
-        
-        # Split into heads
-        Q = self._split_heads(Q) # (batch_size, n_heads, q_len, head_dim)
-        K = self._split_heads(K) # (batch_size, n_heads, k_len, head_dim)
-        V = self._split_heads(V) # (batch_size, n_heads, v_len, head_dim)
-        
-        # Scaled Dot-Product Attention
-        # (batch_size, n_heads, q_len, head_dim) @ (batch_size, n_heads, head_dim, k_len)
-        # -> (batch_size, n_heads, q_len, k_len)
-        scores = torch.matmul(Q, K.transpose(-2, -1)) / math.sqrt(self.head_dim)
-        
-        if mask is not None:
-            # Apply mask (e.g., for decoder or padding)
-            scores = scores.masked_fill(mask == 0, float('-inf'))
-            
-        attention_weights = F.softmax(scores, dim=-1)
-        
-        # Apply attention weights to V
-        # (batch_size, n_heads, q_len, k_len) @ (batch_size, n_heads, v_len, head_dim)
-        # -> (batch_size, n_heads, q_len, head_dim)
-        # Note: k_len == v_len
-        context = torch.matmul(attention_weights, V)
-        
-        # Combine heads
-        context = self._combine_heads(context) # (batch_size, q_len, embed_dim)
-        
-        # Final linear projection
-        output = self.Wo(context) # (batch_size, q_len, embed_dim)
-        
-        return output
-
-class FeedForward(nn.Module):
-    """
-    Position-wise Feed-Forward Network.
-    Applies two linear transformations with a ReLU activation in between.
-    """
-    def __init__(self, embed_dim: int, ff_dim: int):
-        super().__init__()
-        self.fc1 = nn.Linear(embed_dim, ff_dim)
-        self.fc2 = nn.Linear(ff_dim, embed_dim)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # x shape: (batch_size, seq_len, embed_dim)
-        x = F.relu(self.fc1(x))
-        return self.fc2(x)
-        # Output shape: (batch_size, seq_len, embed_dim)
-
-class EncoderLayer(nn.Module):
-    """
-    A single layer of the Transformer Encoder.
-    Consists of Multi-Head Attention and Feed-Forward sublayers,
-    each followed by Add & Norm (Residual Connection + Layer Normalization).
-    """
-    def __init__(self, embed_dim: int, n_heads: int, ff_dim: int):
-        super().__init__()
-        self.mha = MultiHeadAttention(embed_dim, n_heads)
-        self.ff = FeedForward(embed_dim, ff_dim)
-        
-        self.norm1 = nn.LayerNorm(embed_dim)
-        self.norm2 = nn.LayerNorm(embed_dim)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # x shape: (batch_size, n_cities, embed_dim)
-        
-        # Multi-Head Attention sublayer
-        attn_output = self.mha(x, x, x) # Self-attention
-        x = self.norm1(x + attn_output) # Add & Norm
-        
-        # Feed-Forward sublayer
-        ff_output = self.ff(x)
-        x = self.norm2(x + ff_output) # Add & Norm
-        
-        return x
+    def call(self, inputs):
+        # inputs shape: (batch_size, n_cities, 2)
+        return self.dense(inputs)
         # Output shape: (batch_size, n_cities, embed_dim)
 
-class AttentionEncoder(nn.Module):
-    """
-    The Transformer Encoder.
-    Stacks multiple EncoderLayers.
-    """
-    def __init__(self, n_layers: int, embed_dim: int, n_heads: int, ff_dim: int):
-        super().__init__()
-        self.layers = nn.ModuleList([
-            EncoderLayer(embed_dim, n_heads, ff_dim) for _ in range(n_layers)
-        ])
+class MultiHeadAttentionTF(layers.Layer):
+    """Keras MultiHeadAttention layer wrapper for convenience."""
+    def __init__(self, embed_dim, num_heads, **kwargs):
+        super().__init__(**kwargs)
+        self.embed_dim = embed_dim
+        self.num_heads = num_heads
+        if embed_dim % num_heads != 0:
+            raise ValueError(
+                f"embedding dimension = {embed_dim} should be divisible by number of heads = {num_heads}"
+            )
+        # Use the built-in Keras MHA layer
+        self.mha = layers.MultiHeadAttention(num_heads=num_heads, key_dim=embed_dim // num_heads, name='multi_head_attention')
+        # Layer normalization applied after MHA
+        self.layernorm = layers.LayerNormalization(epsilon=1e-6)
+        # Add layer for residual connection
+        self.add = layers.Add()
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # x shape: (batch_size, n_cities, embed_dim)
-        for layer in self.layers:
-            x = layer(x)
-        return x
-        # Output shape: (batch_size, n_cities, embed_dim)
-
-class PointerNetworkDecoder(nn.Module):
-    """
-    Decoder using Pointer Network mechanism.
-    At each step, it uses attention to point to one of the input cities.
-    """
-    def __init__(self, embed_dim: int, n_heads: int):
-        super().__init__()
-        self.mha = MultiHeadAttention(embed_dim, n_heads)
-        
-        # For creating the query vector in MHA
-        # This will combine graph embedding, last city embedding, and first city embedding
-        self.query_projection = nn.Linear(embed_dim * 3, embed_dim)
-        
-        # Clipping value for log-softmax, prevents numerical instability
-        self.tanh_clipping = 10.0
-        
-        # Temperature parameter for exploration vs exploitation (can be learned or fixed)
-        self.softmax_temperature = 1.0
-
-    def forward(
-        self,
-        encoder_output: torch.Tensor,
-        graph_embedding_pooled: torch.Tensor, # Pooled embedding of the whole graph (e.g., mean)
-        current_city_embedding: torch.Tensor,
-        first_city_embedding: torch.Tensor,
-        mask: torch.Tensor
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
-        # encoder_output shape: (batch_size, n_cities, embed_dim)
-        # graph_embedding_pooled shape: (batch_size, embed_dim)
-        # current_city_embedding shape: (batch_size, embed_dim)
-        # first_city_embedding shape: (batch_size, embed_dim)
-        # mask shape: (batch_size, n_cities) - 1 for allowed, 0 for visited/masked
-
-        # Unsqueeze embeddings to add sequence length dimension (of 1)
-        graph_emb_unsqueezed = graph_embedding_pooled.unsqueeze(1) # (bs, 1, embed_dim)
-        current_emb_unsqueezed = current_city_embedding.unsqueeze(1) # (bs, 1, embed_dim)
-        first_emb_unsqueezed = first_city_embedding.unsqueeze(1) # (bs, 1, embed_dim)
-        
-        # Concatenate context features to form the MHA query
-        query_input = torch.cat(
-            (graph_emb_unsqueezed, current_emb_unsqueezed, first_emb_unsqueezed),
-            dim=-1 # Concatenate along the embedding dimension
+    def call(self, inputs, attention_mask=None):
+        # Keras MHA expects query, value, key. For self-attention, they are the same.
+        attn_output, attn_scores = self.mha(
+            query=inputs, value=inputs, key=inputs,
+            attention_mask=attention_mask,
+            return_attention_scores=True
         )
-        # query_input shape: (batch_size, 1, embed_dim * 3)
+        # Residual connection and layer normalization
+        out1 = self.layernorm(self.add([inputs, attn_output]))
+        return out1, attn_scores
 
-        # Project concatenated features to get the final query vector
-        query = self.query_projection(query_input) # (batch_size, 1, embed_dim)
+class FeedForwardTF(layers.Layer):
+    """Position-wise Feed-Forward Network using Dense layers."""
+    def __init__(self, embed_dim, ff_dim, **kwargs):
+        super().__init__(**kwargs)
+        self.embed_dim = embed_dim
+        self.ff_dim = ff_dim
+        # Two dense layers with ReLU activation in between
+        self.dense1 = layers.Dense(ff_dim, activation="relu", name='ff_dense_1')
+        self.dense2 = layers.Dense(embed_dim, name='ff_dense_2')
+        # Layer normalization applied after FF
+        self.layernorm = layers.LayerNormalization(epsilon=1e-6)
+        # Add layer for residual connection
+        self.add = layers.Add()
 
-        # Attention mechanism
-        # Q = query from context, K = V = encoder output (city embeddings)
-        # attn_output shape: (batch_size, 1, embed_dim)
-        attn_output = self.mha(query, encoder_output, encoder_output, mask=mask.unsqueeze(1).unsqueeze(2)) 
-        # Note: Mask needs shape (bs, n_heads=1 (broadcasted), q_len=1, k_len=n_cities) for MHA
+    def call(self, inputs):
+        x = self.dense1(inputs)
+        x = self.dense2(x)
+        # Residual connection and layer normalization
+        out = self.layernorm(self.add([inputs, x]))
+        return out
 
-        # --- Pointer Mechanism ---
-        # Calculate scores (logits) by projecting the attention output onto encoder outputs
-        # This is equivalent to the final attention score calculation *before* softmax
-        # We need the compatibility between the context vector (attn_output) and each node embedding
-        
-        # Re-compute simplified attention scores (dot product) using the attention output
-        # Q = attn_output, K = encoder_output
-        # attn_output: (bs, 1, embed_dim)
-        # encoder_output.transpose(-2, -1): (bs, embed_dim, n_cities)
-        # scores shape: (bs, 1, n_cities)
-        scores = torch.matmul(attn_output, encoder_output.transpose(-2, -1)) / math.sqrt(attn_output.size(-1))
-        
-        # Apply clipping (as done in the paper)
-        scores = self.tanh_clipping * torch.tanh(scores)
+class EncoderLayerTF(layers.Layer):
+    """Single Encoder layer combining MHA and FF."""
+    def __init__(self, embed_dim, num_heads, ff_dim, **kwargs):
+        super().__init__(**kwargs)
+        self.mha = MultiHeadAttentionTF(embed_dim, num_heads)
+        self.ffn = FeedForwardTF(embed_dim, ff_dim)
 
-        # Apply mask *before* softmax
-        # Ensure mask has shape (bs, 1, n_cities) for broadcasting
-        scores_masked = scores.masked_fill(mask.unsqueeze(1) == 0, float('-inf'))
-        
-        # Apply temperature scaling before softmax for exploration
-        log_probs = F.log_softmax(scores_masked / self.softmax_temperature, dim=-1) # (bs, 1, n_cities)
-        
-        # Squeeze out the middle dimension
-        log_probs = log_probs.squeeze(1) # (bs, n_cities)
-        
-        return log_probs # Return log probabilities for training (using REINFORCE)
+    def call(self, inputs, attention_mask=None):
+        attn_output, _ = self.mha(inputs, attention_mask=attention_mask)
+        ffn_output = self.ffn(attn_output)
+        return ffn_output
 
-class AttentionModel(nn.Module):
-    """
-    The main TSP Solver model combining Encoder and Decoder.
-    """
+class AttentionEncoderTF(layers.Layer):
+    """Stacks multiple Encoder layers."""
+    def __init__(self, num_layers, embed_dim, num_heads, ff_dim, **kwargs):
+        super().__init__(**kwargs)
+        self.num_layers = num_layers
+        self.encoder_layers = [
+            EncoderLayerTF(embed_dim, num_heads, ff_dim, name=f'encoder_layer_{i}')
+            for i in range(num_layers)
+        ]
+
+    def call(self, inputs, attention_mask=None):
+        x = inputs
+        for layer in self.encoder_layers:
+            x = layer(x, attention_mask=attention_mask)
+        return x
+
+class PointerDecoderTF(layers.Layer):
+    """Decoder using Pointer Network mechanism with Keras MHA."""
+    def __init__(self, embed_dim, num_heads, tanh_clipping=10.0, softmax_temperature=1.0, **kwargs):
+        super().__init__(**kwargs)
+        self.embed_dim = embed_dim
+        self.num_heads = num_heads
+        self.tanh_clipping = tanh_clipping
+        self.softmax_temperature = softmax_temperature
+
+        self.query_projection = layers.Dense(embed_dim, name='decoder_query_proj')
+        self.mha = layers.MultiHeadAttention(num_heads=num_heads, key_dim=embed_dim // num_heads, name='decoder_mha')
+
+    @tf.function
+    def call(self, encoder_output, graph_embedding_pooled, current_city_embedding, first_city_embedding, mask):
+        context_features = tf.concat([
+            graph_embedding_pooled,
+            current_city_embedding,
+            first_city_embedding
+        ], axis=-1)
+
+        query = self.query_projection(context_features)
+        query = tf.expand_dims(query, axis=1)
+
+        mha_mask = tf.expand_dims(mask, axis=1)
+
+        attn_output = self.mha(query=query, value=encoder_output, key=encoder_output, attention_mask=mha_mask)
+
+        # Simplified dot-product based scoring
+        scores = tf.matmul(query, encoder_output, transpose_b=True) / tf.sqrt(tf.cast(self.embed_dim, tf.float32))
+        scores = self.tanh_clipping * tf.tanh(scores)
+        scores_masked = tf.where(mha_mask, scores, tf.fill(tf.shape(scores), -np.inf))
+        log_probs = tf.nn.log_softmax(scores_masked / self.softmax_temperature, axis=-1)
+        log_probs = tf.squeeze(log_probs, axis=1)
+
+        return log_probs
+
+class AttentionModelTF(keras.Model):
+    """Main TSP Solver model using TensorFlow Keras."""
     def __init__(
         self,
-        embed_dim: int = 128,
-        n_encode_layers: int = 3,
-        n_heads: int = 8,
-        ff_dim: int = 512, # FeedForward hidden dim (usually 4*embed_dim)
-        tanh_clipping: float = 10.0,
-        softmax_temperature: float = 1.0
+        embed_dim=128,
+        num_encoder_layers=3,
+        num_heads=8,
+        ff_dim=512,
+        tanh_clipping=10.0,
+        softmax_temperature=1.0,
+        **kwargs
     ):
-        super().__init__()
+        super().__init__(**kwargs)
         self.embed_dim = embed_dim
-        
-        # Initial embedding layer
-        self.embedding = GraphEmbedding(input_dim=2, embed_dim=embed_dim)
-        
-        # Encoder
-        self.encoder = AttentionEncoder(n_encode_layers, embed_dim, n_heads, ff_dim)
-        
-        # Decoder
-        self.decoder = PointerNetworkDecoder(embed_dim, n_heads)
-        
-        # Parameters from Decoder moved here for convenience
-        self.decoder.tanh_clipping = tanh_clipping
-        self.decoder.softmax_temperature = softmax_temperature
+        self.embedding = GraphEmbedding(embed_dim)
+        self.encoder = AttentionEncoderTF(num_encoder_layers, embed_dim, num_heads, ff_dim)
+        self.decoder = PointerDecoderTF(embed_dim, num_heads, tanh_clipping, softmax_temperature)
 
-    def _get_pooled_embedding(self, embeddings: torch.Tensor) -> torch.Tensor:
-        # Simple mean pooling over the city dimension
-        return embeddings.mean(dim=1)
+    def _get_pooled_embedding(self, embeddings):
+        return tf.reduce_mean(embeddings, axis=1)
 
-    def forward(
-        self,
-        inputs: torch.Tensor,
-        return_log_probs: bool = True
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """
-        Forward pass of the model. Generates tours step-by-step.
+    @tf.function
+    def call(self, inputs, training=False, return_log_probs=True):
+        batch_size = tf.shape(inputs)[0]
+        n_cities = tf.shape(inputs)[1]
 
-        Args:
-            inputs (torch.Tensor): City coordinates, shape (batch_size, n_cities, 2).
-            return_log_probs (bool): If True, returns log probabilities (for training).
-                                      If False, returns sampled tour indices (for inference).
-
-        Returns:
-            Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-            - tour_indices or tours_log_probs: Shape (batch_size, n_cities). Indices if sampling, log-probs if training.
-            - tour_lengths: Calculated lengths of the generated tours, shape (batch_size,).
-            - encoder_output: For potential use in baseline/critic, shape (batch_size, n_cities, embed_dim).
-        """
-        batch_size, n_cities, _ = inputs.shape
-        device = inputs.device
-
-        # 1. Initial Embedding
-        # shape: (batch_size, n_cities, embed_dim)
         initial_embeddings = self.embedding(inputs)
-
-        # 2. Encoder
-        # shape: (batch_size, n_cities, embed_dim)
         encoder_output = self.encoder(initial_embeddings)
-        
-        # 3. Pooled Graph Embedding (for decoder context)
-        # shape: (batch_size, embed_dim)
         graph_embedding_pooled = self._get_pooled_embedding(encoder_output)
 
-        # 4. Decoder Step-by-Step Tour Construction
-        tours_log_probs = [] # Stores log_probs for each step (for training)
-        tour_indices = []    # Stores chosen city indices for each step
+        tour_indices_ta = tf.TensorArray(tf.int64, size=n_cities)
+        tours_log_probs_ta = tf.TensorArray(tf.float32, size=n_cities)
 
-        # Initialize mask (all cities available initially)
-        mask = torch.ones(batch_size, n_cities, device=device)
+        mask = tf.ones((batch_size, n_cities), dtype=tf.bool)
+        current_city_idx = tf.zeros((batch_size,), dtype=tf.int64)
+        first_city_embedding = encoder_output[:, 0, :]
 
-        # Start from a fixed city (or learn starting city - simpler to fix for now)
-        # For simplicity, let's assume we start at city 0
-        current_city_idx = torch.zeros(batch_size, dtype=torch.long, device=device)
-        first_city_embedding = encoder_output[:, 0, :] # Embedding of the starting city
+        for step in tf.range(n_cities):
+            # Store the CURRENT city
+            tour_indices_ta = tour_indices_ta.write(step, current_city_idx)
 
-        # Collect embeddings based on current indices
-        current_city_embedding = torch.gather(
-            encoder_output, 1, current_city_idx.view(-1, 1, 1).expand(-1, -1, self.embed_dim)
-        ).squeeze(1) # Get embedding of the current city
-
-        for step in range(n_cities):
-            # Update mask: Mask the current city
-            mask.scatter_(1, current_city_idx.unsqueeze(1), 0)
-
-            # Decoder forward pass
-            log_probs = self.decoder(
-                encoder_output,
-                graph_embedding_pooled,
-                current_city_embedding,
-                first_city_embedding,
-                mask
+            current_city_embedding = tf.gather(
+                encoder_output, current_city_idx, batch_dims=1
             )
-            # log_probs shape: (batch_size, n_cities)
 
-            if return_log_probs:
-                # Training: Sample actions based on probabilities
-                probs = torch.exp(log_probs)
-                # Ensure no NaN values in probabilities due to masking
-                probs[mask == 0] = 0.0 
-                # Renormalize probabilities if needed
-                probs = probs / (probs.sum(dim=1, keepdim=True) + 1e-8) 
+            mask = tf.tensor_scatter_nd_update(
+                mask,
+                tf.stack([tf.cast(tf.range(batch_size), dtype=tf.int64), current_city_idx], axis=1),
+                tf.zeros((batch_size,), dtype=tf.bool)
+            )
 
-                next_city_idx = torch.multinomial(probs, 1).squeeze(1) # Sample based on probs
-                
-                # Get the log_prob of the *chosen* action
-                step_log_prob = torch.gather(log_probs, 1, next_city_idx.unsqueeze(-1)).squeeze(-1)
-                tours_log_probs.append(step_log_prob)
+            # Run decoder and sample NEXT city (if not last step)
+            if step < n_cities - 1:
+                log_probs = self.decoder(
+                    encoder_output,
+                    graph_embedding_pooled,
+                    current_city_embedding,
+                    first_city_embedding,
+                    mask
+                )
 
-            else:
-                # Inference: Choose the most likely city (greedy)
-                next_city_idx = torch.argmax(log_probs, dim=1) # Greedy selection
+                if return_log_probs:
+                    # Training: Sample next city
+                    next_city_idx = tf.random.categorical(log_probs, 1)
+                    next_city_idx = tf.squeeze(next_city_idx, axis=-1)
+                    step_log_prob = tf.gather(log_probs, next_city_idx, batch_dims=1)
+                    tours_log_probs_ta = tours_log_probs_ta.write(step, step_log_prob)
+                else:
+                    # Inference: Greedy
+                    next_city_idx = tf.argmax(log_probs, axis=1, output_type=tf.int64)
 
-            # Store the chosen city index
-            tour_indices.append(next_city_idx)
+                current_city_idx = next_city_idx
             
-            # Update current city for the next step
-            current_city_idx = next_city_idx
-            current_city_embedding = torch.gather(
-                encoder_output, 1, current_city_idx.view(-1, 1, 1).expand(-1, -1, self.embed_dim)
-            ).squeeze(1)
+            elif return_log_probs:
+                # Last step
+                tours_log_probs_ta = tours_log_probs_ta.write(step, tf.zeros((batch_size,)))
 
-        # Stack results from all steps
-        if return_log_probs:
-            tours_log_probs = torch.stack(tours_log_probs, dim=1) # (batch_size, n_cities)
-        tour_indices = torch.stack(tour_indices, dim=1)         # (batch_size, n_cities)
-
-        # Calculate tour lengths
+        tour_indices = tf.transpose(tour_indices_ta.stack())
         tour_lengths = self.calculate_tour_lengths(inputs, tour_indices)
 
         if return_log_probs:
+            tours_log_probs = tf.transpose(tours_log_probs_ta.stack())
             return tours_log_probs, tour_lengths, encoder_output
         else:
             return tour_indices, tour_lengths, encoder_output
-            
-    def calculate_tour_lengths(self, coords: torch.Tensor, tour_indices: torch.Tensor) -> torch.Tensor:
-        """Calculate the length of tours given coordinates and indices."""
-        batch_size, n_cities, _ = coords.shape
-        device = coords.device
 
-        # Gather coordinates in tour order
-        # Shape: (batch_size, n_cities, 2)
-        tour_coords = torch.gather(
-            coords, 1, tour_indices.unsqueeze(-1).expand(-1, -1, 2)
-        )
+    @tf.function
+    def calculate_tour_lengths(self, coords, tour_indices):
+        batch_size = tf.shape(coords)[0]
+        n_cities = tf.shape(coords)[1]
 
-        # Calculate step distances (including return to start)
-        # Shift coordinates to get pairs (city_i, city_{i+1})
-        rolled_coords = torch.roll(tour_coords, shifts=-1, dims=1)
+        batch_indices = tf.range(batch_size)[:, tf.newaxis]
+        batch_indices = tf.tile(batch_indices, [1, n_cities])
         
-        # Calculate Euclidean distances between consecutive cities
-        # Shape: (batch_size, n_cities)
-        segment_lengths = torch.sqrt(
-            ((tour_coords - rolled_coords)**2).sum(dim=2)
-        )
-        
-        # Sum segment lengths to get total tour length
-        # Shape: (batch_size,)
-        tour_lengths = segment_lengths.sum(dim=1)
-        
+        gather_indices = tf.stack([batch_indices, tf.cast(tour_indices, tf.int32)], axis=-1)
+        tour_coords = tf.gather_nd(coords, gather_indices)
+
+        rolled_coords = tf.roll(tour_coords, shift=-1, axis=1)
+        segment_lengths = tf.sqrt(tf.reduce_sum(tf.square(tour_coords - rolled_coords), axis=2))
+        tour_lengths = tf.reduce_sum(segment_lengths, axis=1)
         return tour_lengths
-
-# --- Example Usage (for testing) ---
-if __name__ == '__main__':
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"Using device: {device}")
-
-    model = AttentionModel(embed_dim=128, n_encode_layers=3).to(device)
-    
-    # Generate dummy data
-    batch_size = 4
-    n_cities = 10
-    dummy_input = torch.rand(batch_size, n_cities, 2, device=device) # Random coords [0, 1]
-
-    # Test training mode
-    model.train()
-    tours_log_probs, tour_lengths, _ = model(dummy_input, return_log_probs=True)
-    print("\n--- Training Mode Output ---")
-    print("Log Probs shape:", tours_log_probs.shape) # Should be (batch_size, n_cities)
-    print("Tour Lengths shape:", tour_lengths.shape) # Should be (batch_size,)
-    print("Example Tour Lengths:", tour_lengths.detach().cpu().numpy())
-
-    # Test inference mode
-    model.eval()
-    with torch.no_grad():
-        tour_indices, tour_lengths, _ = model(dummy_input, return_log_probs=False)
-    print("\n--- Inference Mode Output ---")
-    print("Tour Indices shape:", tour_indices.shape) # Should be (batch_size, n_cities)
-    print("Tour Lengths shape:", tour_lengths.shape) # Should be (batch_size,)
-    print("Example Tour Indices (first batch):\n", tour_indices[0].detach().cpu().numpy())
-    print("Example Tour Lengths:", tour_lengths.detach().cpu().numpy())
-    
-    # Check if lengths match calculated lengths
-    recalculated_lengths = model.calculate_tour_lengths(dummy_input, tour_indices)
-    print("\nRecalculated Lengths:", recalculated_lengths.detach().cpu().numpy())
-    print("Lengths Match:", torch.allclose(tour_lengths, recalculated_lengths))

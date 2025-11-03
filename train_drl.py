@@ -4,15 +4,16 @@ from tensorflow.keras import optimizers
 from tqdm import tqdm # Progress bar
 import numpy as np
 import os
-import random # *** MODIFIED: Import random for sampling n_cities ***
+import random
 
 from attention_model import AttentionModelTF # Import the TF model
 from data_generator import generate_tsp_data
 
 def train_attention_model_tf(
-    # *** MODIFIED: Define min/max cities instead of fixed n_cities ***
-    min_cities: int = 2,
-    max_cities: int = 50,
+    # *** 1. MODIFIED: Start from 10 cities ***
+    min_cities: int = 10,
+    # *** 2. MODIFIED: Train up to 60 cities ***
+    max_cities: int = 60,
     # ------------------------------------------------------------------
     embed_dim: int = 128,
     num_encoder_layers: int = 3,
@@ -24,8 +25,8 @@ def train_attention_model_tf(
     lr: float = 1e-4,
     baseline_alpha: float = 0.99, # EMA decay factor for baseline
     save_path: str = "trained_models_tf", # Separate folder for TF models
-    # *** CORRECTED: Use the required .weights.h5 suffix ***
-    model_filename: str = "tsp_2_50_attention_model_tf.weights.h5"
+    # *** 3. MODIFIED: New filename for the new model ***
+    model_filename: str = "tsp_10_60_attention_model_tf.weights.h5"
     # --------------------------------------------------------
 ):
     """
@@ -123,12 +124,11 @@ def train_attention_model_tf(
 # --- Main Execution Block ---
 if __name__ == "__main__":
     train_attention_model_tf(
-        min_cities=2,
-        max_cities=50,
+        min_cities=10,  # <-- Use new min
+        max_cities=60,  # <-- Use new max
         n_epochs=100,
-        batch_size=256,
+        # *** 4. MODIFIED: Smaller batch size for stability on larger problems ***
+        batch_size=128, 
         steps_per_epoch=500,
-        # *** CORRECTED: Use the required .weights.h5 suffix in the call too ***
-        model_filename="tsp_2_50_attention_model_tf.weights.h5"
-        # ----------------------------------------------------------------------
+        model_filename="tsp_10_60_attention_model_tf.weights.h5" # <-- Use new name
     )
