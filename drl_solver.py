@@ -18,8 +18,8 @@ class DRLSolver:
     def __init__(
         self,
         cities: List[City],
-        # *** MODIFIED: Set default model path ***
-        model_path: str = "trained_models_tf/tsp_2_50_attention_model_tf.weights.h5"
+        # *** This path is correct ***
+        model_path: str = "tsp_checkpoints"
     ):
         self.cities = cities
         self.n_cities = len(cities)
@@ -27,12 +27,11 @@ class DRLSolver:
         self.model_path = model_path
         self.model = None # This will hold the trained Keras model
         
-        # *** MODIFIED: Attempt to load the model on initialization ***
         if model_path and os.path.exists(model_path):
             try:
                 self._load_model(model_path)
             except Exception as e:
-                print(f"[DRL Solver Warning] Found model file but failed to load: {e}")
+                print(f"[DRL Solver Warning] Found model path but failed to load: {e}")
                 print("Falling back to heuristic.")
         else:
             print("[DRL Solver Info] No trained model file found. Using heuristic fallback.")
@@ -58,7 +57,19 @@ class DRLSolver:
         _ = self.model(dummy_input, return_log_probs=False)
         
         # 3. Load the saved weights
-        self.model.load_weights(model_path)
+        # ==================== THE FIX ====================
+        # Check if model_path is a directory (like 'tsp_checkpoints')
+        if os.path.isdir(model_path):
+            # If it is, find the latest checkpoint file *inside* it
+            latest_ckpt = tf.train.latest_checkpoint(model_path)
+            if latest_ckpt is None:
+                raise FileNotFoundError(f"No checkpoint found in directory: {model_path}")
+            print(f"[DRL Solver Info] Found latest checkpoint: {latest_ckpt}")
+            self.model.load_weights(latest_ckpt)
+        else:
+            # Otherwise, assume it's a single file (like .h5) and load directly
+            self.model.load_weights(model_path)
+        # ===============================================
         
         print("[DRL Solver Info] Model loaded successfully.")
     

@@ -1,35 +1,64 @@
-import numpy as np
-import tensorflow as tf # Import tf mainly for testing dtype
+import re # Make sure 'import re' is at the top of the file
 
-def generate_tsp_data(batch_size: int, n_cities: int) -> np.ndarray:
+def load_tsp_file(file_path: str) -> list:
     """
-    Generates a batch of random TSP instances using NumPy.
-    Cities are represented by 2D coordinates sampled uniformly from [0, 1].
-
+    Loads a .tsp file (TSPLIB format) and returns a list of City objects.
+    
     Args:
-        batch_size (int): Number of TSP instances in the batch.
-        n_cities (int): Number of cities in each instance.
+        file_path (str): The path to the .tsp file.
 
     Returns:
-        np.ndarray: Batch of city coordinates, shape (batch_size, n_cities, 2), dtype float32.
+        list: A list of City objects.
     """
-    # Use float32 as it's standard for TF models
-    return np.random.rand(batch_size, n_cities, 2).astype(np.float32)
+    cities = []
+    # Regex to capture "node_id x_coord y_coord"
+    # It handles integers and scientific notation (like in berlin52.tsp)
+    coord_pattern = re.compile(
+        r"^\s*(\d+)\s+([\d.eE+-]+)\s+([\d.eE+-]+)\s*$", 
+        re.MULTILINE
+    )
+    
+    try:
+        with open(file_path, 'r') as f:
+            content = f.read()
+            
+            # Find the start of the coordinate section
+            node_coord_section = re.search(r"NODE_COORD_SECTION", content)
+            if not node_coord_section:
+                print(f"Error: NODE_COORD_SECTION not found in {file_path}")
+                return []
+            
+            # Find the end of the file or another section
+            eof_section = re.search(r"EOF", content[node_coord_section.end():])
+            
+            if eof_section:
+                coord_data = content[node_coord_section.end() : node_coord_section.end() + eof_section.start()]
+            else:
+                coord_data = content[node_coord_section.end():] # Read to end if EOF is missing
+            
+            # Find all matching coordinate lines
+            matches = coord_pattern.findall(coord_data)
+            
+            if not matches:
+                print(f"Error: No coordinates found in NODE_COORD_SECTION in {file_path}")
+                return []
 
-# --- Example Usage ---
-if __name__ == '__main__':
-    batch_size = 4
-    n_cities = 20
-    data = generate_tsp_data(batch_size, n_cities)
-
-    print("--- TSP Data Generation (NumPy/TF) ---")
-    print("Batch size:", batch_size)
-    print("Number of cities:", n_cities)
-    print("Data shape:", data.shape) # Should be (batch_size, n_cities, 2)
-    print("Data type:", data.dtype) # Should be float32
-    print("First instance (first 5 cities):\n", data[0, :5, :])
-
-    # Test conversion to TensorFlow tensor
-    tf_data = tf.convert_to_tensor(data)
-    print("\nTensorFlow tensor shape:", tf_data.shape)
-    print("TensorFlow tensor dtype:", tf_data.dtype)
+            for match in matches:
+                # We don't use node_id (match[0]) but it's good for validation
+                name = str(match[0])
+                x = float(match[1])
+                y = float(match[2])
+                
+                # We need to import the City class
+                # Make sure this import is at the top of data_generator.py
+                from tsp_core import City
+                cities.append(City(x, y, name))
+                
+    except FileNotFoundError:
+        print(f"Error: File not found at {file_path}")
+        return []
+    except Exception as e:
+        print(f"Error parsing {file_path}: {e}")
+        return []
+        
+    return cities

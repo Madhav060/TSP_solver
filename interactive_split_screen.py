@@ -823,7 +823,7 @@ class FullScreenTSPSolver:
                     self.finish_solving()
             else:
                 if hasattr(self, '_done_check_time'):
-                    delattr(self, '_done_check_time')
+                    delattr(self, '_done_check_time');
 
     def update_algorithm_panel(self, key: str, update: dict):
         """Update panel with solver progress."""
