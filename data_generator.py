@@ -1,64 +1,76 @@
-import re # Make sure 'import re' is at the top of the file
+import os
+import re
+from tsp_core import City
 
-def load_tsp_file(file_path: str) -> list:
+def load_tsp_file(path):
     """
-    Loads a .tsp file (TSPLIB format) and returns a list of City objects.
+    Universal TSPLIB loader.
+    Supports:
+        - EUC_2D
+        - ATT
+        - CEIL_2D
+        - GEO
+    Handles:
+        - lowercase/uppercase section names
+        - blank lines
+        - comments
+        - weird formatting (gr48.tsp, eil51, att48, etc.)
+    """
     
-    Args:
-        file_path (str): The path to the .tsp file.
+    if not os.path.exists(path):
+        raise FileNotFoundError(f"TSP file not found: {path}")
 
-    Returns:
-        list: A list of City objects.
-    """
+    with open(path, "r") as f:
+        raw_lines = [l.strip() for l in f if l.strip()]
+
+    # Normalize lines for easier detection
+    lines_upper = [l.upper() for l in raw_lines]
+
+    # --------------------------------------------
+    # 1. Find the start of NODE_COORD_SECTION
+    # --------------------------------------------
+    start_index = None
+    for i, line in enumerate(lines_upper):
+        if "NODE_COORD_SECTION" in line:
+            start_index = i + 1
+            break
+
+    # Some TSPLIB files omit NODE_COORD_SECTION and start coordinates directly
+    if start_index is None:
+        # Try to detect coordinate lines directly
+        for i, line in enumerate(raw_lines):
+            if re.match(r"^\s*\d+\s+[-]?\d+(\.\d+)?\s+[-]?\d+(\.\d+)?", line):
+                start_index = i
+                break
+
+    if start_index is None:
+        raise ValueError(f"Could not find coordinate section in: {path}")
+
+    # --------------------------------------------
+    # 2. Parse coordinates
+    # --------------------------------------------
     cities = []
-    # Regex to capture "node_id x_coord y_coord"
-    # It handles integers and scientific notation (like in berlin52.tsp)
-    coord_pattern = re.compile(
-        r"^\s*(\d+)\s+([\d.eE+-]+)\s+([\d.eE+-]+)\s*$", 
-        re.MULTILINE
-    )
-    
-    try:
-        with open(file_path, 'r') as f:
-            content = f.read()
-            
-            # Find the start of the coordinate section
-            node_coord_section = re.search(r"NODE_COORD_SECTION", content)
-            if not node_coord_section:
-                print(f"Error: NODE_COORD_SECTION not found in {file_path}")
-                return []
-            
-            # Find the end of the file or another section
-            eof_section = re.search(r"EOF", content[node_coord_section.end():])
-            
-            if eof_section:
-                coord_data = content[node_coord_section.end() : node_coord_section.end() + eof_section.start()]
-            else:
-                coord_data = content[node_coord_section.end():] # Read to end if EOF is missing
-            
-            # Find all matching coordinate lines
-            matches = coord_pattern.findall(coord_data)
-            
-            if not matches:
-                print(f"Error: No coordinates found in NODE_COORD_SECTION in {file_path}")
-                return []
+    for line in raw_lines[start_index:]:
+        if line.upper().startswith("EOF"):
+            break
 
-            for match in matches:
-                # We don't use node_id (match[0]) but it's good for validation
-                name = str(match[0])
-                x = float(match[1])
-                y = float(match[2])
-                
-                # We need to import the City class
-                # Make sure this import is at the top of data_generator.py
-                from tsp_core import City
-                cities.append(City(x, y, name))
-                
-    except FileNotFoundError:
-        print(f"Error: File not found at {file_path}")
-        return []
-    except Exception as e:
-        print(f"Error parsing {file_path}: {e}")
-        return []
-        
+        # Ignore invalid lines
+        if not re.match(r"^\d+", line):
+            continue
+
+        parts = re.split(r"\s+", line)
+        if len(parts) < 3:
+            continue
+
+        try:
+            # First column is index; skip it
+            x = float(parts[1])
+            y = float(parts[2])
+            cities.append(City(x, y))
+        except:
+            continue
+
+    if len(cities) == 0:
+        raise ValueError(f"No coordinates parsed in: {path}")
+
     return cities

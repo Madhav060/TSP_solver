@@ -1,245 +1,383 @@
-"""
-benchmark.py
-
-Runs a formal benchmark comparing all available TSP solvers (DRL, GA, ACO, Hybrid)
-on a single instance (berlin52.tsp) over multiple runs.
-"""
-
 import os
 import time
 import numpy as np
 import pandas as pd
 from tqdm import tqdm
 
-# --- Import Your Project's Solvers ---
-try:
-    from data_generator import load_tsp_file
-except ImportError:
-    print("Error: Could not import 'load_tsp_file' from 'data_generator.py'")
-    print("Please ensure that function exists and the file is in your path.")
-    exit()
-
-from tsp_core import City
+# Solver imports
+from data_generator import load_tsp_file
 from drl_solver import DRLSolver
 from genetic_algorithm import GeneticAlgorithmSolver
 from ant_colony import AntColonyOptimizer
-from hybrid_solver import HybridSolverACO
 
 
-# --- Benchmark Configuration ---
-TSP_FILE = 'berlin52.tsp'
-OPTIMAL_DISTANCE = 7542.0  # Known optimal for berlin52
-N_RUNS = 10                # Number of times to run each stochastic algorithm
-OUTPUT_DIR = 'benchmarks'
+# ================================
+# CONFIGURATION
+# ================================
+DATASET_DIR = "tsp_data"
+OUTPUT_DIR = "benchmarks_full"
+TIME_LIMIT = 2.0
+RUNS_PER_DATASET = 10
+VERBOSE_SOLVER = False
+ALPHA = 0.5   # Balanced weight for combined score
 
-# Solver parameters for a 52-city problem (rigorous settings)
-GA_GENERATIONS = 1000
-ACO_ITERATIONS = 1000
-HYBRID_ITERATIONS = 500 # DRL seed + 500 ACO iterations
+os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 
-def run_benchmark():
-    """
-    Main benchmark function.
-    """
-    # --- 1. Setup ---
-    os.makedirs(OUTPUT_DIR, exist_ok=True)
-    
-    print("="*70)
-    print(f"🚀 RUNNING TSP SOLVER BENCHMARK")
-    print("="*70)
-    print(f"Problem:         {TSP_FILE} (Optimal: {OPTIMAL_DISTANCE})")
-    print(f"Stochastic Runs: {N_RUNS} per solver")
-    print(f"Solvers:         DRL, GA, ACO, Hybrid")
-    print("="*70)
+# =============================================================
+# TIME-WRAPPER: Equal-Time + Time-to-Target
+# =============================================================
+def run_with_time_limit(solve_fn, max_time_limit, target_distance=None, **kwargs):
 
-    # --- 2. Load Cities ---
-    print(f"\nLoading cities from {TSP_FILE}...")
-    cities = load_tsp_file(TSP_FILE)
-    if not cities:
-        print(f"Error: Could not load cities from {TSP_FILE}.")
-        return
-    print(f"✓ Loaded {len(cities)} cities.")
+    start = time.time()
+    best_tour = None
+    best_time = max_time_limit
+    logs = []
 
-    # --- 3. Pre-load DRL Model ---
-    # This is a one-time cost. We load it here so the DRL and Hybrid
-    # solvers can use the already-loaded model instance.
-    print("\nPre-loading DRL model (from tsp_checkpoints)...")
+    def callback(tour):
+        nonlocal best_tour, best_time
+
+        now = time.time()
+        elapsed = now - start
+
+        if tour is None:
+            return
+
+        if isinstance(tour, tuple):
+            tour = tour[0]
+
+        if not hasattr(tour, "get_total_distance"):
+            return
+
+        dist = tour.get_total_distance()
+
+        if best_tour is None or dist < best_tour.get_total_distance():
+            best_tour = tour.clone()
+            logs.append((elapsed, dist))
+
+            if target_distance is not None and dist <= target_distance:
+                best_time = elapsed
+                raise StopIteration
+
+        if elapsed >= max_time_limit:
+            raise TimeoutError
+
     try:
-        drl_solver_instance = DRLSolver(cities)
-        if not drl_solver_instance.model:
-            print("⚠️  DRL model not loaded (running in heuristic mode).")
-        else:
-            print("✓ DRL model loaded successfully.")
-    except Exception as e:
-        print(f"✗ CRITICAL ERROR: Could not load DRL model: {e}")
-        print("   Cannot run DRL or Hybrid benchmarks. Exiting.")
-        return
+        final = solve_fn(
+            time_limit=max_time_limit, callback=callback, verbose=VERBOSE_SOLVER, **kwargs
+        )
 
-    # --- 4. Define Solver Configurations ---
-    solver_configs = [
-        {
-            'name': 'DRL (Model + 2-Opt)',
-            'solver_class': None, # We use the pre-loaded instance
-            'instance': drl_solver_instance,
-            'solve_method': 'solve_fast',
-            'solve_params': {'use_2opt': True, 'verbose': False}
-        },
-        {
-            'name': f'Genetic Algorithm ({GA_GENERATIONS} gen)',
-            'solver_class': GeneticAlgorithmSolver,
-            'instance': None, # We create a new one each run
-            'init_params': {
-                'cities': cities,
-                'population_size': 100,
-                'mutation_rate': 0.015,
-                'tournament_size': 5
-            },
-            'solve_method': 'solve',
-            'solve_params': {'generations': GA_GENERATIONS, 'verbose': False}
-        },
-        {
-            'name': f'Ant Colony ({ACO_ITERATIONS} iter)',
-            'solver_class': AntColonyOptimizer,
-            'instance': None, # We create a new one each run
-            'init_params': {'cities': cities, 'n_ants': 30},
-            'solve_method': 'solve',
-            'solve_params': {'iterations': ACO_ITERATIONS, 'verbose': False, 'seed_tour': None}
-        },
-        {
-            'name': f'Hybrid (DRL + ACO {HYBRID_ITERATIONS} iter)',
-            'solver_class': HybridSolverACO,
-            'instance': None, # We create a new one each run
-            'init_params': {
-                'cities': cities,
-                'drl_solver': drl_solver_instance # Pass the pre-loaded solver
-            },
-            'solve_method': 'solve',
-            'solve_params': {'quick_iterations': HYBRID_ITERATIONS, 'verbose': False, 'use_2opt': True}
-        }
-    ]
+        if isinstance(final, tuple):
+            final = final[0]
 
-    # --- 5. Run Benchmark Loop ---
-    all_results = []
-    
-    for config in solver_configs:
-        solver_name = config['name']
-        print(f"\n--- Benchmarking: {solver_name} ---")
-        
-        run_distances = []
-        run_times = []
-        
-        # Use tqdm for a progress bar over N_RUNS
-        for i in tqdm(range(N_RUNS), desc=f"Running {solver_name}"):
-            # Instantiate solver
-            if config['instance'] is not None:
-                solver = config['instance'] # Use pre-loaded DRL
+        if final is None:
+            final = best_tour
+
+        if final and best_time == max_time_limit:
+            best_time = time.time() - start
+
+    except StopIteration:
+        final = best_tour
+    except TimeoutError:
+        final = best_tour
+        best_time = max_time_limit
+    except Exception:
+        final = best_tour
+        best_time = max_time_limit
+
+    elapsed = time.time() - start
+    return final, logs, elapsed if target_distance is None else best_time
+
+
+# =============================================================
+# SOLVER WRAPPERS
+# =============================================================
+def drl_wrapper(cities, time_limit, callback, verbose):
+    solver = DRLSolver(cities)
+    tour, _ = solver.solve_fast(use_2opt=True, verbose=verbose, time_limit=time_limit)
+    if tour is not None:
+        callback(tour)
+    return tour
+
+
+def ga_wrapper(cities, time_limit, callback, verbose):
+    solver = GeneticAlgorithmSolver(cities)
+    solver.initialize()
+    start = time.time()
+
+    while True:
+        solver.evolve_generation()
+        callback(solver.get_best_tour())
+        if time.time() - start >= time_limit:
+            break
+
+    return solver.get_best_tour()
+
+
+def aco_wrapper(cities, time_limit, callback, verbose):
+    solver = AntColonyOptimizer(cities)
+    solver._initialize_pheromones()
+    start = time.time()
+
+    while True:
+        tours = [solver._construct_tour() for _ in range(solver.n_ants)]
+        for t in tours:
+            callback(t)
+        solver._update_pheromones(tours)
+        if time.time() - start >= time_limit:
+            break
+
+    return solver.get_best_tour()
+
+
+def hybrid_wrapper(cities, time_limit, callback, verbose):
+
+    start = time.time()
+
+    # 1. DRL Kickstart
+    drl = DRLSolver(cities)
+    drl_tour, _ = drl.solve_fast(use_2opt=True, verbose=verbose, time_limit=None)
+    callback(drl_tour)
+
+    # Adaptive skip for tiny datasets
+    if len(cities) < 40:
+        return drl_tour
+
+    # 2. ACO refinement
+    aco = AntColonyOptimizer(cities)
+    aco._initialize_pheromones(seed_tour=drl_tour)
+
+    while True:
+        if time.time() - start >= time_limit:
+            break
+
+        tours = [aco._construct_tour() for _ in range(aco.n_ants)]
+        for t in tours:
+            callback(t)
+        aco._update_pheromones(tours)
+
+    return aco.get_best_tour()
+
+
+SOLVERS = {
+    "DRL": drl_wrapper,
+    "GA": ga_wrapper,
+    "ACO": aco_wrapper,
+    "Hybrid": hybrid_wrapper,
+}
+
+
+
+# =============================================================
+# EQUAL-TIME BENCHMARK
+# =============================================================
+def benchmark_equal_time(path):
+
+    print("\n" + "*" * 30)
+    print(f"Running Equal-Time benchmark for {path} (Time Limit: {TIME_LIMIT:.1f}s)")
+    print("*" * 30)
+
+    cities = load_tsp_file(path)
+    if not cities:
+        print(f"Error loading: {path}")
+        return []
+
+    results = []
+
+    for name, fn in SOLVERS.items():
+        print(f"\n--- Running {name} ---")
+
+        distances = []
+        times = []
+
+        for _ in tqdm(range(RUNS_PER_DATASET), desc=name):
+
+            tour, logs, elapsed = run_with_time_limit(
+                lambda time_limit, callback, verbose: fn(
+                    cities=cities,
+                    time_limit=time_limit,
+                    callback=callback,
+                    verbose=verbose
+                ),
+                max_time_limit=TIME_LIMIT,
+                target_distance=None
+            )
+
+            # ---- SAFETY FIX ----
+            if tour is None:
+                distances.append(float("inf"))   # Worst possible
             else:
-                solver = config['solver_class'](**config['init_params'])
+                try:
+                    distances.append(tour.get_total_distance())
+                except:
+                    distances.append(float("inf"))
+            # --------------------
 
-            # Run and time the solve method
-            start_time = time.time()
-            solve_method_to_call = getattr(solver, config['solve_method'])
-            tour = solve_method_to_call(**config['solve_params'])
-            end_time = time.time()
-            
-            run_distances.append(tour.get_total_distance())
-            run_times.append(end_time - start_time)
-            
-            # For deterministic solvers, no need to run N times
-            if solver_name == 'DRL (Model + 2-Opt)':
-                print("\n   (DRL is deterministic, only running once)")
-                run_distances = run_distances * N_RUNS # Fill list with same result
-                run_times = run_times * N_RUNS
-                break 
+            times.append(elapsed)
 
-        # Calculate stats
-        all_results.append({
-            'Solver': solver_name,
-            'Avg. Distance': np.mean(run_distances),
-            'Best Distance': np.min(run_distances),
-            'Std. Dev.': np.std(run_distances),
-            'Avg. Time (s)': np.mean(run_times)
+        results.append({
+            "dataset": os.path.basename(path),
+            "solver": name,
+            "metric": "Equal_Time",
+            "avg_dist": float(np.mean(distances)),
+            "best_dist": float(np.min(distances)),
+            "std_dist": float(np.std(distances)),
+            "avg_time": float(np.mean(times)),
         })
 
-    # --- 6. Process and Save Results ---
-    print("\n" + "="*70)
-    print("📊 Benchmark Complete: Processing Results")
-    print("="*70)
-    
-    df = pd.DataFrame(all_results)
-    
-    # Add comparison columns
-    df['Optimal'] = OPTIMAL_DISTANCE
-    df['Avg. Error (%)'] = ((df['Avg. Distance'] - OPTIMAL_DISTANCE) / OPTIMAL_DISTANCE) * 100.0
-    df['Best Error (%)'] = ((df['Best Distance'] - OPTIMAL_DISTANCE) / OPTIMAL_DISTANCE) * 100.0
-    
-    # Sort by best average distance
-    df = df.sort_values(by='Avg. Distance')
-    
-    # Re-order columns for clarity
-    df = df[[
-        'Solver', 
-        'Avg. Distance', 
-        'Best Distance', 
-        'Avg. Time (s)', 
-        'Avg. Error (%)', 
-        'Best Error (%)',
-        'Std. Dev.'
-    ]]
-    
-    # --- 7. Save Files ---
-    report_md_path = os.path.join(OUTPUT_DIR, 'solver_comparison_report.md')
-    results_csv_path = os.path.join(OUTPUT_DIR, 'solver_comparison_results.csv')
-    results_json_path = os.path.join(OUTPUT_DIR, 'solver_comparison_results.json')
-    
-    # Save raw data
-    df.to_csv(results_csv_path, index=False, float_format='%.3f')
-    df.to_json(results_json_path, orient='records', indent=4)
-    
-    # Format for Markdown report
-    df_md = df.copy()
-    df_md['Avg. Distance'] = df_md['Avg. Distance'].map('{:,.2f}'.format)
-    df_md['Best Distance'] = df_md['Best Distance'].map('{:,.2f}'.format)
-    df_md['Avg. Time (s)'] = df_md['Avg. Time (s)'].map('{:,.3f}'.format)
-    df_md['Avg. Error (%)'] = df_md['Avg. Error (%)'].map('{:+.2f}%'.format)
-    df_md['Best Error (%)'] = df_md['Best Error (%)'].map('{:+.2f}%'.format)
-    df_md['Std. Dev.'] = df_md['Std. Dev.'].map('{:,.2f}'.format)
-    
-    best_solver = df.iloc[0] # Get the top row after sorting
+    return results
 
-    summary = f"""# 🏆 TSP Solver Benchmark: berlin52.tsp
 
-**Test Run:** {time.strftime("%Y-%m-%d %H:%M:%S")}
-**Problem:** `{TSP_FILE}` (52 cities)
-**Known Optimal Distance:** `{OPTIMAL_DISTANCE}`
-**Runs per Solver:** `{N_RUNS}`
 
-## 🥇 Best Performing Solver (by Avg. Distance)
+# =============================================================
+# TIME-TO-TARGET BENCHMARK
+# =============================================================
+def benchmark_time_to_target(path, target_dist):
+    rows = []
+    cities = load_tsp_file(path)
+    MAX_TIME = 30.0
 
-**{best_solver['Solver']}**
-* **Average Distance:** {best_solver['Avg. Distance']:.2f} ({best_solver['Avg. Error (%)']:+.2f}% from optimal)
-* **Best Distance:** {best_solver['Best Distance']:.2f} ({best_solver['Best Error (%)']:+.2f}% from optimal)
-* **Average Time:** {best_solver['Avg. Time (s)']:.3f}s
+    for name, fn in SOLVERS.items():
+        times = []
 
-## 📊 Full Comparison Table
-*(Sorted by `Avg. Distance`)*
+        for _ in range(RUNS_PER_DATASET):
+            _, _, t_hit = run_with_time_limit(
+                lambda tl, cb, vb: fn(cities=cities, time_limit=tl, callback=cb, verbose=vb),
+                max_time_limit=MAX_TIME,
+                target_distance=target_dist
+            )
+            times.append(t_hit)
 
-{df_md.to_markdown(index=False)}
-"""
-    
-    with open(report_md_path, 'w') as f:
-        f.write(summary)
+        hit_rate = np.mean([t < MAX_TIME for t in times])
 
-    # --- 8. Print Final Summary to Console ---
-    print("\n" + df_md.to_string(index=False))
-    
-    print("\n" + "="*70)
-    print("✓ Benchmark Proof Saved!")
-    print(f"Human-readable report: {report_md_path}")
-    print(f"CSV data:              {results_csv_path}")
-    print("="*70)
+        rows.append({
+            "dataset": os.path.basename(path),
+            "solver": name,
+            "metric": "Time_to_Target",
+            "target_dist": target_dist,
+            "avg_time": float(np.mean(times)),
+            "hit_rate": float(hit_rate),
+        })
+
+    return rows
+
+
+
+# =============================================================
+# COMBINED SCORE BENCHMARK (NEW)
+# =============================================================
+def benchmark_combined_score(equal_rows):
+    rows = []
+
+    df = pd.DataFrame(equal_rows)
+
+    # Normalize inside each dataset
+    for dataset in df["dataset"].unique():
+
+        sub = df[df["dataset"] == dataset]
+
+        dist_min, dist_max = sub["avg_dist"].min(), sub["avg_dist"].max()
+        time_min, time_max = sub["avg_time"].min(), sub["avg_time"].max()
+
+        for _, row in sub.iterrows():
+
+            dist_norm = (row["avg_dist"] - dist_min) / (dist_max - dist_min + 1e-9)
+            time_norm = (row["avg_time"] - time_min) / (time_max - time_min + 1e-9)
+
+            score = ALPHA * dist_norm + (1 - ALPHA) * time_norm
+
+            rows.append({
+                "dataset": dataset,
+                "solver": row["solver"],
+                "metric": "Combined_Score",
+                "score": float(score),
+                "dist_norm": float(dist_norm),
+                "time_norm": float(time_norm),
+            })
+
+    return rows
+
+
+
+# =============================================================
+# TARGET DISTANCES
+# =============================================================
+def get_target_dist(dataset):
+    targets = {
+        "att48.tsp": 35000.0,
+        "berlin52.tsp": 7700.0,
+        "dj38.tsp": 6700.0,
+        "ulysses22.tsp": 76.0,
+    }
+    return targets.get(dataset, 1e9)
+
+
+
+# =============================================================
+# MAIN
+# =============================================================
+def run_benchmark_all():
+    all_rows = []
+
+    tsp_files = sorted([
+        f for f in os.listdir(DATASET_DIR)
+        if f.endswith(".tsp") and f != "gr48.tsp"
+    ])
+
+    equal_rows = []
+
+    for fname in tsp_files:
+        path = os.path.join(DATASET_DIR, fname)
+
+        # === 1. Equal-Time Quality ===
+        eq = benchmark_equal_time(path)
+        equal_rows.extend(eq)
+        all_rows.extend(eq)
+
+        # === 2. Time-to-Target ===
+        target = get_target_dist(fname)
+        tt = benchmark_time_to_target(path, target)
+        all_rows.extend(tt)
+
+    # === 3. Combined Score ===
+    comb_rows = benchmark_combined_score(equal_rows)
+    all_rows.extend(comb_rows)
+
+    df = pd.DataFrame(all_rows)
+    df.to_csv(os.path.join(OUTPUT_DIR, "full_benchmarks.csv"), index=False)
+
+    print("\n=== Combined Score (Lower = Better) ===")
+    print(pd.DataFrame(comb_rows).sort_values(by=["dataset", "score"]))
+
+    print("\n=== Done. Results saved. ===")
+
+
+        # Save full combined df
+    df = pd.DataFrame(all_rows)
+
+    # === SAVE EQUAL-TIME RESULTS ===
+    df_equal = df[df['metric'] == 'Equal_Time']
+    df_equal.to_csv(os.path.join(OUTPUT_DIR, "equal_time_results.csv"), index=False)
+
+    # === SAVE TIME-TO-TARGET RESULTS ===
+    df_ttt = df[df['metric'] == 'Time_to_Target']
+    df_ttt.to_csv(os.path.join(OUTPUT_DIR, "time_to_target_results.csv"), index=False)
+
+    # === SAVE COMBINED SCORE RESULTS ===
+    df_comb = df[df['metric'] == 'Combined_Score']
+    df_comb.to_csv(os.path.join(OUTPUT_DIR, "combined_score_results.csv"), index=False)
+
+    # Save all three merged
+    df.to_csv(os.path.join(OUTPUT_DIR, "full_benchmarks.csv"), index=False)
+
+    print("\nSaved:")
+    print(" - equal_time_results.csv")
+    print(" - time_to_target_results.csv")
+    print(" - combined_score_results.csv")
+    print(" - full_benchmarks.csv")
+
+
 
 
 if __name__ == "__main__":
-    run_benchmark()
+    run_benchmark_all()

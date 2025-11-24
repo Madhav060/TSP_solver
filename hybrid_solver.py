@@ -1,9 +1,7 @@
-"""
-Hybrid Solver: DRL + Ant Colony Optimization
-Uses DRL for fast initialization, then refines with ACO
-"""
+import time
+from typing import List, Optional, Tuple
 
-from typing import List, Optional, Callable
+# Assuming these modules are available and imported correctly
 from tsp_core import City, Tour
 from drl_solver import DRLSolver
 from ant_colony import AntColonyOptimizer
@@ -11,179 +9,121 @@ from ant_colony import AntColonyOptimizer
 
 class HybridSolverACO:
     """
-    Hybrid solver combining Deep RL and Ant Colony Optimization.
-    DRL provides a high-quality initial solution quickly.
-    ACO refines it further with its exploration capabilities.
+    Hybrid TSP Solver:
+    - Phase 1: DRL for fast high-quality initialization
+    - Phase 2: ACO refinement ONLY within remaining time_limit
+    - Adaptive ACO iterations based on TSP size
     """
-    
-    def __init__(
-        self,
-        cities: List[City],
-        drl_solver: Optional[DRLSolver] = None,
-        aco_params: Optional[dict] = None
-    ):
-        """
-        Initialize the hybrid solver.
-        
-        Args:
-            cities: List of City objects
-            drl_solver: Pre-loaded DRL solver (optional, will create if None)
-            aco_params: Parameters for ACO solver
-        """
+
+    def __init__(self, cities: List[City], aco_params=None):
         self.cities = cities
-        self.drl_solver = drl_solver  # May be None
-        
-        # Default ACO parameters optimized for refinement
+        self.drl = DRLSolver(cities)
+
+        # Default ACO parameters
+        # --- FIX APPLIED HERE ---
+        # seed_weight reduced from 50.0 to 5.0 to prevent strong initial bias
         self.aco_params = aco_params or {
-            'n_ants': 25,
-            'alpha': 1.0,
-            'beta': 3.0,
-            'rho': 0.5,
-            'q': 100.0,
-            'elite_weight': 2.0,
-            'seed_weight': 10.0
+            "n_ants": 25,
+            "alpha": 1.0,
+            "beta": 3.0,
+            "rho": 0.5,
+            "q": 100.0,
+            "elite_weight": 2.0,
+            "seed_weight": 5.0,   # Lowered bias for more exploration
         }
-    
+
+    # --------------------------------------------------------
+    #  ADAPTIVE ACO ITERATIONS BASED ON #CITIES
+    # --------------------------------------------------------
+    def compute_iterations(self):
+        n = len(self.cities)
+
+        if 10 <= n < 20:
+            return 100
+        elif 20 <= n < 30:
+            return 200
+        elif 30 <= n < 40:
+            return 300
+        elif 40 <= n < 50:
+            return 400
+        elif 50 <= n < 60:
+            return 500
+
+        # Generic fallback rule for large inputs
+        return min(max(n * 8, 200), 1000)
+
+    # --------------------------------------------------------
+    #  MAIN HYBRID SOLVER
+    # --------------------------------------------------------
     def solve(
         self,
-        quick_iterations: int = 500,
-        verbose: bool = True,
-        use_2opt: bool = True
-    ) -> Tour:
-        """
-        Solve the TSP using the hybrid approach.
-        
-        Args:
-            quick_iterations: Number of ACO iterations
-            verbose: Print progress information
-            use_2opt: Apply 2-opt improvement to DRL solution
-            
-        Returns:
-            Best tour found
-        """
-        if verbose:
-            print(f"\n{'='*60}")
-            print(f"HYBRID SOLVER: DRL + Ant Colony Optimization")
-            print(f"{'='*60}")
-            print(f"Phase 1: DRL Fast Inference")
-            print(f"Phase 2: ACO Refinement ({quick_iterations} iterations)")
-            print(f"{'='*60}\n")
-        
-        # Phase 1: Get initial solution from DRL
-        if self.drl_solver is None:
-            if verbose:
-                print("Initializing DRL solver...")
-            self.drl_solver = DRLSolver(self.cities)
-        
-        initial_tour = self.drl_solver.solve_fast(use_2opt=use_2opt, verbose=verbose)
-        
-        if verbose:
-            print(f"\n[Phase 1 Complete]")
-            print(f"DRL Initial Distance: {initial_tour.get_total_distance():.2f}")
-            print(f"\n[Phase 2: ACO Refinement Starting...]")
-        
-        # Phase 2: Refine with ACO
-        aco_solver = AntColonyOptimizer(
-            cities=self.cities,
-            **self.aco_params
+        quick_iterations: Optional[int] = None,
+        callback=None,  # Added callback for external logging/timing
+        verbose: bool = False,
+        use_2opt: bool = True,
+        time_limit: Optional[float] = None
+    ) -> Tuple[Tour, list]:
+
+        start_time = time.time()
+        log = []
+        best_tour = None # Track best tour across both phases
+
+        # --------------------------------------------------------
+        #  PHASE 1 — DRL INITIALIZATION
+        # --------------------------------------------------------
+        drl_tour, _ = self.drl.solve_fast(
+            use_2opt=use_2opt,
+            verbose=False,
+            time_limit=None
         )
+
+        best_tour = drl_tour
+        init_dist = drl_tour.get_total_distance()
         
-        final_tour = aco_solver.solve(
-            iterations=quick_iterations,
-            seed_tour=initial_tour,
-            verbose=verbose
-        )
-        
-        if verbose:
-            improvement = (
-                (initial_tour.get_total_distance() - final_tour.get_total_distance()) 
-                / initial_tour.get_total_distance() * 100
-            )
-            print(f"\n{'='*60}")
-            print(f"HYBRID SOLVER COMPLETE")
-            print(f"{'='*60}")
-            print(f"Initial (DRL):     {initial_tour.get_total_distance():.2f}")
-            print(f"Final (DRL+ACO):   {final_tour.get_total_distance():.2f}")
-            print(f"Improvement:       {improvement:.2f}%")
-            print(f"{'='*60}\n")
-        
-        return final_tour
-    
-    def solve_step_by_step(
-        self,
-        quick_iterations: int = 500,
-        callback: Optional[Callable] = None,
-        initial_tour: Optional[Tour] = None  # *** CRITICAL: Accept pre-calculated tour ***
-    ) -> Tour:
-        """
-        Solve with step-by-step callbacks for visualization.
-        
-        *** IMPORTANT: For thread safety, pass initial_tour pre-calculated in main thread ***
-        
-        Args:
-            quick_iterations: Number of ACO iterations
-            callback: Function called with (solver, phase, iteration, tour)
-            initial_tour: Pre-calculated DRL tour (REQUIRED for thread safety)
-            
-        Returns:
-            Best tour found
-        """
-        # Phase 1: DRL
-        # *** CRITICAL FIX: DO NOT call DRL in this thread if running in background ***
-        if initial_tour is None:
-            # Only calculate DRL tour if not provided
-            # This should ONLY happen when called from main thread
-            if self.drl_solver is None:
-                self.drl_solver = DRLSolver(self.cities)
-            
-            if callback:
-                callback(self, 'drl', 0, None)
-            
-            initial_tour = self.drl_solver.solve_fast(use_2opt=True, verbose=False)
-        
-        # Send the DRL tour to callback
+        # Log and callback DRL result immediately
+        log.append((0.0, init_dist))
         if callback:
-            callback(self, 'drl', 1, initial_tour)
-        
-        # Phase 2: ACO Refinement
-        aco_solver = AntColonyOptimizer(
-            cities=self.cities,
-            **self.aco_params
-        )
-        
-        # Callback wrapper for ACO
-        def aco_callback(solver, iteration):
-            if callback:
-                best_tour = solver.get_best_tour()
-                # Pass 1-indexed iteration
-                callback(self, 'aco', iteration + 1, best_tour)
-        
-        # Run ACO with the initial tour as seed
-        final_tour = aco_solver.solve(
+            callback(best_tour) 
+
+        elapsed = time.time() - start_time
+
+        # Remaining time for refinement
+        remaining = None
+        if time_limit is not None:
+            remaining = max(0.0, time_limit - elapsed)
+            if remaining <= 0:
+                return best_tour, log # No time for ACO
+
+        # --------------------------------------------------------
+        #  PHASE 2 — ACO REFINEMENT
+        # --------------------------------------------------------
+
+        # Determine ACO iterations adaptively if not given
+        if quick_iterations is None:
+            quick_iterations = self.compute_iterations()
+
+        aco = AntColonyOptimizer(self.cities, **self.aco_params)
+
+        aco_tour, aco_log = aco.solve(
             iterations=quick_iterations,
             verbose=False,
-            callback=aco_callback,
-            seed_tour=initial_tour
+            seed_tour=drl_tour,
+            time_limit=remaining
         )
-        
-        return final_tour
+
+        # Merge ACO log (shift by DRL time) and find the true best tour
+        for t, d in aco_log:
+            current_time = elapsed + t
+            log.append((current_time, d))
+            
+            # Update best_tour
+            if d < best_tour.get_total_distance():
+                best_tour = aco_tour
+                
+            # Call back for external logging/time-to-target tracking
+            if callback:
+                callback(aco_tour) 
 
 
-def solve_tsp_hybrid_aco(
-    cities: List[City],
-    iterations: int = 500,
-    verbose: bool = True
-) -> Tour:
-    """
-    Convenience function to solve TSP with hybrid approach.
-    
-    Args:
-        cities: List of City objects
-        iterations: Number of ACO iterations for refinement
-        verbose: Print progress information
-        
-    Returns:
-        Best tour found
-    """
-    solver = HybridSolverACO(cities)
-    return solver.solve(quick_iterations=iterations, verbose=verbose)
+        # Ensure the final returned tour is the one with the best distance found
+        return best_tour, log

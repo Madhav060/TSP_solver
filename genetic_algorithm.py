@@ -1,9 +1,10 @@
 """
-TSP Solver - Genetic Algorithm Implementation
-Goal 1: Create the Best Quality Solution (Near-Perfect)
+Genetic Algorithm Solver with Time-Limit Support + Convergence Logging
+Compatible with multi-instance benchmark.
 """
 
 import random
+import time
 import numpy as np
 from typing import List, Tuple
 from tsp_core import City, Tour
@@ -19,34 +20,32 @@ class Population:
     
     def initialize(self):
         """Initialize population with random tours."""
-        print(f"Initializing population with {self.population_size} random tours...")
         self.tours = []
-        
         for _ in range(self.population_size):
-            shuffled_cities = self.cities.copy()
-            random.shuffle(shuffled_cities)
-            self.tours.append(Tour(shuffled_cities))
+            shuffled = self.cities.copy()
+            random.shuffle(shuffled)
+            self.tours.append(Tour(shuffled))
     
     def seed_with_tour(self, seed_tour: Tour, copies: int = 1):
-        """Seed the population with a good starting tour (for hybrid approach)."""
         for _ in range(copies):
             self.tours.append(seed_tour.clone())
     
     def get_fittest(self) -> Tour:
-        """Find and return the fittest tour in the population."""
         return max(self.tours, key=lambda tour: tour.get_fitness())
     
     def get_average_distance(self) -> float:
-        """Calculate average distance across all tours."""
-        return np.mean([tour.get_total_distance() for tour in self.tours])
+        return np.mean([t.get_total_distance() for t in self.tours])
 
 
 class GeneticAlgorithmSolver:
     """
-    Genetic Algorithm solver for TSP.
-    Uses tournament selection, ordered crossover, and swap mutation.
+    Genetic Algorithm solver for TSP
+    Upgraded for:
+    - time-limit execution
+    - convergence logging
+    - compatibility with multi-instance benchmark
     """
-    
+
     def __init__(
         self,
         cities: List[City],
@@ -62,192 +61,148 @@ class GeneticAlgorithmSolver:
         self.tournament_size = tournament_size
         self.elitism = elitism
         self.elite_size = elite_size
-        
+
+        # GA state
         self.population = None
         self.generation = 0
-        self.best_distance_history = []
-        self.avg_distance_history = []
-    
+
+    # ---------------------------------------
+    # Initialization
+    # ---------------------------------------
+
     def initialize(self, seed_tour: Tour = None):
-        """Initialize the population."""
         self.population = Population(self.population_size, self.cities)
-        
+
         if seed_tour:
-            # Hybrid approach: seed with a good solution
-            print("Seeding population with provided tour...")
             self.population.seed_with_tour(seed_tour, copies=self.elite_size)
-            # Fill the rest with random tours
-            remaining = self.population_size - self.elite_size
-            for _ in range(remaining):
-                shuffled_cities = self.cities.copy()
-                random.shuffle(shuffled_cities)
-                self.population.tours.append(Tour(shuffled_cities))
+            for _ in range(self.population_size - self.elite_size):
+                shuffled = self.cities.copy()
+                random.shuffle(shuffled)
+                self.population.tours.append(Tour(shuffled))
         else:
-            # Start from scratch with random tours
             self.population.initialize()
-        
+
         self.generation = 0
-        self.best_distance_history = []
-        self.avg_distance_history = []
-        
-        # Record initial statistics
-        best = self.population.get_fittest()
-        self.best_distance_history.append(best.get_total_distance())
-        self.avg_distance_history.append(self.population.get_average_distance())
-    
+
+    # ---------------------------------------
+    # Genetic operators
+    # ---------------------------------------
+
     def tournament_selection(self) -> Tour:
-        """
-        Tournament selection: pick random tours and return the best one.
-        """
-        tournament = random.sample(self.population.tours, self.tournament_size)
-        return max(tournament, key=lambda tour: tour.get_fitness())
-    
+        candidates = random.sample(self.population.tours, self.tournament_size)
+        return max(candidates, key=lambda t: t.get_fitness())
+
     def ordered_crossover(self, parent1: Tour, parent2: Tour) -> Tour:
-        """
-        Ordered Crossover (OX): Combine two parent tours to create a child.
-        Preserves a subsequence from parent1 and fills the rest from parent2.
-        """
         size = len(parent1.cities)
-        
-        # Select random start and end positions
         start = random.randint(0, size - 1)
         end = random.randint(0, size - 1)
-        
         if start > end:
             start, end = end, start
-        
-        # Initialize child with None
-        child_cities = [None] * size
-        
-        # Copy subsequence from parent1
+
+        child = [None] * size
         for i in range(start, end + 1):
-            child_cities[i] = parent1.cities[i]
-        
-        # Fill remaining positions with cities from parent2
-        parent2_index = 0
+            child[i] = parent1.cities[i]
+
+        p2_idx = 0
         for i in range(size):
-            if child_cities[i] is None:
-                # Find next city from parent2 that's not already in child
-                while parent2.cities[parent2_index] in child_cities:
-                    parent2_index += 1
-                child_cities[i] = parent2.cities[parent2_index]
-                parent2_index += 1
-        
-        return Tour(child_cities)
-    
-    def swap_mutation(self, tour: Tour) -> Tour:
-        """
-        Swap Mutation: Randomly swap two cities in the tour.
-        Applied with a probability of mutation_rate.
-        """
-        mutated_tour = tour.clone()
-        
-        for i in range(len(mutated_tour.cities)):
+            if child[i] is None:
+                while parent2.cities[p2_idx] in child:
+                    p2_idx += 1
+                child[i] = parent2.cities[p2_idx]
+                p2_idx += 1
+
+        return Tour(child)
+
+    def swap_mutation(self, tour: Tour):
+        mutated = tour.clone()
+        for i in range(len(mutated.cities)):
             if random.random() < self.mutation_rate:
-                j = random.randint(0, len(mutated_tour.cities) - 1)
-                # Swap cities at positions i and j
-                mutated_tour.cities[i], mutated_tour.cities[j] = \
-                    mutated_tour.cities[j], mutated_tour.cities[i]
-                mutated_tour.invalidate_cache()
-        
-        return mutated_tour
-    
+                j = random.randint(0, len(mutated.cities) - 1)
+                mutated.cities[i], mutated.cities[j] = (
+                    mutated.cities[j],
+                    mutated.cities[i],
+                )
+                mutated.invalidate_cache()
+        return mutated
+
+    # ---------------------------------------
+    # Single generation evolution
+    # ---------------------------------------
+
     def evolve_generation(self):
-        """Evolve the population by one generation."""
-        new_population = Population(self.population_size, self.cities)
-        new_population.tours = []
-        
-        # Elitism: Keep the best tours from the previous generation
+        new_pop = Population(self.population_size, self.cities)
+        new_pop.tours = []
+
+        # --- elitism ---
         if self.elitism:
-            # Sort by fitness and keep the elite
-            sorted_tours = sorted(
+            elites = sorted(
                 self.population.tours,
                 key=lambda t: t.get_fitness(),
-                reverse=True
-            )
-            for i in range(self.elite_size):
-                new_population.tours.append(sorted_tours[i].clone())
-        
-        # Fill the rest of the new population
-        while len(new_population.tours) < self.population_size:
-            # Selection
-            parent1 = self.tournament_selection()
-            parent2 = self.tournament_selection()
-            
-            # Crossover
-            child = self.ordered_crossover(parent1, parent2)
-            
-            # Mutation
+                reverse=True,
+            )[: self.elite_size]
+            for elite in elites:
+                new_pop.tours.append(elite.clone())
+
+        # --- generate rest ---
+        while len(new_pop.tours) < self.population_size:
+            p1 = self.tournament_selection()
+            p2 = self.tournament_selection()
+            child = self.ordered_crossover(p1, p2)
             child = self.swap_mutation(child)
-            
-            new_population.tours.append(child)
-        
-        # Replace old population
-        self.population = new_population
+            new_pop.tours.append(child)
+
+        self.population = new_pop
         self.generation += 1
-        
-        # Record statistics
-        best = self.population.get_fittest()
-        self.best_distance_history.append(best.get_total_distance())
-        self.avg_distance_history.append(self.population.get_average_distance())
-    
-    def solve(self, generations: int = 1000, verbose: bool = True, callback=None) -> Tour:
+
+    # ---------------------------------------
+    # TIME-LIMITED SOLVE FUNCTION
+    # ---------------------------------------
+
+    def solve(self, time_limit=None, verbose=False, generations=None) -> Tuple[Tour, list]:
         """
-        Run the genetic algorithm for a specified number of generations.
-        
-        Args:
-            generations: Number of generations to evolve
-            verbose: Print progress information
-            callback: Optional callback function called after each generation
-        
         Returns:
-            The best tour found
+            best_tour
+            log = [(time, best_distance)]
         """
         if self.population is None:
             self.initialize()
-        
-        if verbose:
-            print(f"\n{'='*60}")
-            print(f"Starting Genetic Algorithm")
-            print(f"{'='*60}")
-            print(f"Population Size: {self.population_size}")
-            print(f"Mutation Rate: {self.mutation_rate}")
-            print(f"Tournament Size: {self.tournament_size}")
-            print(f"Elitism: {self.elitism} (Elite Size: {self.elite_size})")
-            print(f"Generations: {generations}")
-            print(f"{'='*60}\n")
-            
-            initial_best = self.population.get_fittest()
-            print(f"Initial Best Distance: {initial_best.get_total_distance():.2f}")
-        
-        # Evolution loop
-        for gen in range(generations):
+
+        start = time.time()
+        log = []
+
+        # Initial best
+        best = self.population.get_fittest()
+        best_dist = best.get_total_distance()
+        log.append((0.0, best_dist))
+
+        gen = 0
+        while True:
+
+            # stop if time finished
+            if time_limit is not None and time.time() - start >= time_limit:
+                break
+
+            # stop if fixed generation requested
+            if generations is not None and gen >= generations:
+                break
+
+            # evolve generation
             self.evolve_generation()
-            
-            if callback:
-                callback(self)
-            
-            if verbose and (gen + 1) % 100 == 0:
-                best = self.population.get_fittest()
-                avg = self.population.get_average_distance()
-                print(f"Generation {gen + 1:4d} | "
-                      f"Best: {best.get_total_distance():8.2f} | "
-                      f"Avg: {avg:8.2f}")
-        
-        best_tour = self.population.get_fittest()
-        
-        if verbose:
-            print(f"\n{'='*60}")
-            print(f"Evolution Complete!")
-            print(f"{'='*60}")
-            print(f"Final Best Distance: {best_tour.get_total_distance():.2f}")
-            improvement = ((self.best_distance_history[0] - best_tour.get_total_distance()) 
-                          / self.best_distance_history[0] * 100)
-            print(f"Improvement: {improvement:.2f}%")
-            print(f"{'='*60}\n")
-        
-        return best_tour
-    
-    def get_best_tour(self) -> Tour:
-        """Get the current best tour."""
+            gen += 1
+
+            # log best
+            best = self.population.get_fittest()
+            dist = best.get_total_distance()
+
+            if dist < best_dist:
+                best_dist = dist
+                log.append((time.time() - start, best_dist))
+
+        # clip log
+        if time_limit is not None:
+            log = [(t, d) for (t, d) in log if t <= time_limit]
+
+        return best, log
+
+    def get_best_tour(self):
         return self.population.get_fittest() if self.population else None
